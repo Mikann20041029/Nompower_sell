@@ -38,7 +38,7 @@ jobs:
             echo "[ERROR] SecretsにDEEPSEEK_API_KEYを入れてください" >&2
             exit 1
           fi
-          python nompower_pipeline/generate.py
+          python pipeline/generate.py
 
       - name: Commit & push (if changed)
         run: |
