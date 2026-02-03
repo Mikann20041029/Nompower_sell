@@ -38,7 +38,8 @@ jobs:
             echo "[ERROR] SecretsにDEEPSEEK_API_KEYを入れてください" >&2
             exit 1
           fi
-          python pipeline/generate.py
+          PYTHONPATH=. python pipeline/generate.py
+
 
       - name: Commit & push (if changed)
         run: |
