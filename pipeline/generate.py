@@ -1,4 +1,4 @@
-# nompower_pipeline/generate.py
+# pipeline/generate.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -12,7 +12,7 @@ import html as _html
 import urllib.request
 from urllib.parse import urlparse
 
-from nompower_pipeline.util import (
+from pipeline.util import (
     ROOT,
     read_text,
     write_text,
@@ -23,69 +23,44 @@ from nompower_pipeline.util import (
     jaccard,
     sanitize_llm_html,
 )
-from nompower_pipeline.deepseek import DeepSeekClient
-from nompower_pipeline.reddit import fetch_rss_entries
-from nompower_pipeline.render import env_for, render_to_file, write_asset
+from pipeline.deepseek import DeepSeekClient
+from pipeline.reddit import fetch_rss_entries
+from pipeline.render import env_for, render_to_file, write_asset
 
 # -----------------------------
 # Paths
 # -----------------------------
-CONFIG_PATH = ROOT / "nompower_pipeline" / "config.json"
-ADS_JSON_PATH = ROOT / "nompower_pipeline" / "ads.json"
+# 販売テンプレとして「分かりやすさ優先」：configはレポ直下
+CONFIG_PATH = ROOT / "config.json"
+ADS_JSON_PATH = ROOT / "ads.json"
+
 PROCESSED_PATH = ROOT / "processed_urls.txt"
 ARTICLES_PATH = ROOT / "data" / "articles.json"
 LAST_RUN_PATH = ROOT / "data" / "last_run.json"
 
-TEMPLATES_DIR = ROOT / "nompower_pipeline" / "templates"
-STATIC_DIR = ROOT / "nompower_pipeline" / "static"
+TEMPLATES_DIR = ROOT / "pipeline" / "templates"
+STATIC_DIR = ROOT / "pipeline" / "static"
 
 
 # -----------------------------
 # Default Ads (optional)
-# NOTE: For a product template, you should ideally keep these empty by default
-# and let users paste their own codes into ads.json.
+# NOTE: 商品としてはads.jsonを空テンプレにして、ここは空でもいい。
 # -----------------------------
-ADS_TOP = """
-<script>
-(function(){
-  try {
-    var dbg = (window.__ads_debug === true);
-    var t0 = Date.now();
-    function log(){ if(dbg) console.log.apply(console, arguments); }
-
-    if (window.__ads_loaded) return;
-    window.__ads_loaded = true;
-
-    var s = document.createElement("script");
-    s.async = true;
-    s.src = "https://example.com/your-ad-script.js"; // placeholder
-    s.onload = function(){ log("[ads] loaded", "ms=", (Date.now()-t0)); };
-    s.onerror = function(e){ console.error("[ads] FAILED", e); };
-
-    var parent = document.head || document.body || document.documentElement;
-    parent.appendChild(s);
-  } catch (e) {
-    console.error("[ads] exception", e);
-  }
-})();
-</script>
-""".strip()
-
-ADS_MID = ADS_TOP
-ADS_BOTTOM = ADS_TOP
-
+ADS_TOP = ""
+ADS_MID = ""
+ADS_BOTTOM = ""
 ADS_RAIL_LEFT = ""
 ADS_RAIL_RIGHT = ""
 
 FIXED_POLICY_BLOCK = """
-<p><strong>Policy & Transparency (to stay search-friendly)</strong></p>
+<p><strong>Policy & Transparency</strong></p>
 <ul>
-  <li><strong>Source & attribution:</strong> Each post is based on a public Reddit RSS item. We link to the original post and do not claim ownership of third-party content.</li>
-  <li><strong>Original value:</strong> We add commentary, context, and takeaways. If uncertain, we label it as "Not stated in the source."</li>
+  <li><strong>Source & attribution:</strong> Each post is based on public RSS items. We link to the original source.</li>
+  <li><strong>Original value:</strong> We add commentary, context, and takeaways. If uncertain: "Not stated in the source."</li>
   <li><strong>No manipulation:</strong> No cloaking, hidden text, doorway pages, or misleading metadata.</li>
   <li><strong>Safety filters:</strong> We skip obvious adult/self-harm/gore keywords and avoid NSFW feeds.</li>
-  <li><strong>Ads:</strong> Third-party scripts may show ads we do not directly control. If you see problematic ads, contact us.</li>
-  <li><strong>Removal requests:</strong> If content should be removed (copyright/personal data), email us with the URL and reason.</li>
+  <li><strong>Ads:</strong> Third-party scripts may show ads we do not directly control.</li>
+  <li><strong>Removal requests:</strong> If content should be removed, contact us with the URL and reason.</li>
 </ul>
 <p>Contact: <a href="mailto:{contact_email}">{contact_email}</a></p>
 """.strip()
@@ -112,9 +87,8 @@ def get_site_dir(cfg: dict) -> Path:
     site_dir_str = (
         cfg.get("site", {}).get("site_dir")
         or cfg.get("output", {}).get("site_dir")
-        or "site"
+        or "docs"
     )
-    # allow "docs" or "site" etc.
     return ROOT / str(site_dir_str).strip().lstrip("./")
 
 
@@ -165,13 +139,6 @@ def related_articles(current: dict, articles: list[dict], k: int = 6) -> list[di
 # Ads / Affiliate (optional)
 # -----------------------------
 def load_ads_catalog() -> dict:
-    """
-    ads.json format example:
-    {
-      "tech": [{"id":"t1","title":"...","detail":"...","code":"<a ...>...</a>"}],
-      "health": [...]
-    }
-    """
     if not ADS_JSON_PATH.exists():
         return {}
     try:
@@ -182,7 +149,6 @@ def load_ads_catalog() -> dict:
 
 def classify_genre(title: str, summary: str) -> str:
     text = f"{title} {summary}".lower()
-
     rules = [
         ("health", ["health", "hair", "sleep", "diet", "doctor", "study says", "medical", "wellness"]),
         ("beauty", ["skincare", "beauty", "cosmetic", "laser", "dermatology", "makeup"]),
@@ -219,19 +185,16 @@ def choose_ad(ads_catalog: dict, genre: str) -> Tuple[Optional[dict], Optional[s
             return []
         return [x for x in v if isinstance(x, dict) and str(x.get("code", "")).strip()]
 
-    # exact
     if genre != "general":
         pool = pool_for(genre)
         if pool:
             return (random.choice(pool), genre)
 
-    # related
     for g in RELATED_GENRES.get(genre, []):
         pool = pool_for(g)
         if pool:
             return (random.choice(pool), g)
 
-    # any
     all_ads: list[dict] = []
     for k, v in ads_catalog.items():
         if k == "general":
@@ -250,11 +213,6 @@ def build_affiliate_section(
     summary: str,
     ads_catalog: dict,
 ) -> Tuple[str, Optional[str]]:
-    """
-    Returns (affiliate_html, chosen_ad_id)
-    If you want tracking, set cfg.site.go_base_url to your redirect endpoint.
-    Otherwise, we link directly to the code-provided link (if any).
-    """
     genre = classify_genre(title, summary)
     ad, _picked = choose_ad(ads_catalog, genre)
     if not ad:
@@ -265,7 +223,6 @@ def build_affiliate_section(
     if not raw_code:
         return ("", None)
 
-    # Optional tracking endpoint
     go_base_url = (cfg.get("site", {}).get("go_base_url") or "").strip().rstrip("/")
     tracked_url = ""
     if go_base_url and ad_id:
@@ -303,9 +260,6 @@ def _guess_ext_from_url(u: str) -> str:
 
 
 def cache_og_image(cfg: dict, site_dir: Path, base_url: str, src_url: str, article_id: str) -> str:
-    """
-    Cache external image under site_dir/og/ and return absolute URL.
-    """
     src_url = (src_url or "").strip()
     if not src_url:
         return ""
@@ -319,8 +273,7 @@ def cache_og_image(cfg: dict, site_dir: Path, base_url: str, src_url: str, artic
         try:
             ua = (cfg.get("site", {}).get("user_agent") or "").strip()
             if not ua:
-                # generic UA (template-safe)
-                ua = "Mozilla/5.0 (compatible; NompowerBot/1.0)"
+                ua = "Mozilla/5.0 (compatible; AutoSiteBot/1.0)"
             req = urllib.request.Request(src_url, headers={"User-Agent": ua})
             with urllib.request.urlopen(req, timeout=20) as r:
                 data = r.read()
@@ -362,16 +315,13 @@ def pick_candidate(cfg: dict, processed: set[str], articles: list[dict]) -> Opti
             if too_similar:
                 continue
 
-            # keep only "safe" hero image if your reddit parser provided it
             e["image_url"] = e.get("hero_image", "") or ""
             e["image_kind"] = e.get("hero_image_kind", "none") or "none"
-
             candidates.append(e)
 
     if not candidates:
         return None
 
-    # Pick one stably: newest first if RSS preserves order; otherwise randomize a bit
     if cfg.get("generation", {}).get("pick_random", False):
         return random.choice(candidates)
     return candidates[0]
@@ -392,7 +342,6 @@ def deepseek_article(cfg: dict, item: dict) -> Tuple[str, str]:
     link = item.get("link", "").strip()
     summary = (item.get("summary", "") or "").strip()
 
-    # Optional: feed ad context into the prompt (value stays high)
     ads_catalog = {}
     ad = None
     if cfg.get("ads", {}).get("enable_ad_context_in_prompt", True):
@@ -487,17 +436,17 @@ def strip_leading_duplicate_title(body_html: str, title: str) -> str:
 
     m = re.match(r"(?is)^\s*<h1[^>]*>(.*?)</h1>\s*", s)
     if m and _same(m.group(1)):
-        return s[m.end() :].lstrip()
+        return s[m.end():].lstrip()
 
     m = re.match(r"(?is)^\s*<h2[^>]*>(.*?)</h2>\s*", s)
     if m and _same(m.group(1)):
-        return s[m.end() :].lstrip()
+        return s[m.end():].lstrip()
 
     m = re.match(r"(?is)^\s*<p[^>]*>(.*?)</p>\s*", s)
     if m:
         inner = re.sub(r"(?is)<[^>]+>", "", m.group(1))
         if _same(inner):
-            return s[m.end() :].lstrip()
+            return s[m.end():].lstrip()
 
     return body_html
 
@@ -507,7 +456,7 @@ def strip_leading_duplicate_title(body_html: str, title: str) -> str:
 # -----------------------------
 def write_rss_feed(cfg: dict, site_dir: Path, articles: list[dict], limit: int = 10) -> None:
     base_url = cfg["site"]["base_url"].rstrip("/")
-    site_title = cfg["site"].get("title", "Nompower")
+    site_title = cfg["site"].get("title", "AutoSite")
     site_desc = cfg["site"].get("description", "Daily digest")
 
     items = sorted(articles, key=lambda a: a.get("published_ts", ""), reverse=True)[:limit]
@@ -596,11 +545,10 @@ Sitemap: {base_url}/sitemap.xml
         "now_iso": now_utc_iso(),
     }
 
-    # index
     ctx = dict(base_ctx)
     ctx.update(
         {
-            "title": cfg["site"].get("title", "Nompower"),
+            "title": cfg["site"].get("title", "AutoSite"),
             "description": cfg["site"].get("description", "Daily digest"),
             "canonical": base_url + "/",
             "og_type": "website",
@@ -613,7 +561,7 @@ Sitemap: {base_url}/sitemap.xml
         ("about", "About", "<p>Daily digest from public sources with added context and takeaways.</p>"),
         ("privacy", "Privacy", "<p>We do not require accounts. Third-party scripts may collect device identifiers.</p>"),
         ("terms", "Terms", "<p>Use at your own risk. We do not guarantee outcomes.</p>"),
-        ("disclaimer", "Disclaimer", "<p>Not affiliated with Reddit. Trademarks belong to their owners.</p>"),
+        ("disclaimer", "Disclaimer", "<p>Not affiliated with any source. Trademarks belong to their owners.</p>"),
         ("contact", "Contact", f"<p>Email: <a href='mailto:{cfg['site']['contact_email']}'>{cfg['site']['contact_email']}</a></p>"),
     ]
     for slug, page_title, body in static_pages:
@@ -631,7 +579,6 @@ Sitemap: {base_url}/sitemap.xml
         )
         render_to_file(jenv, "static.html", ctx, site_dir / f"{slug}.html")
 
-    # article pages
     og_cfg = cfg.get("og", {})
     og_cache_enabled = bool(og_cfg.get("cache_images", True))
 
@@ -648,7 +595,7 @@ Sitemap: {base_url}/sitemap.xml
                 "a": a,
                 "related": rel,
                 "policy_block": FIXED_POLICY_BLOCK.format(contact_email=cfg["site"]["contact_email"]),
-                "title": a.get("title", cfg["site"].get("title", "Nompower")),
+                "title": a.get("title", cfg["site"].get("title", "AutoSite")),
                 "description": (a.get("summary", "") or cfg["site"].get("description", "Daily digest"))[:200],
                 "canonical": f"{base_url}{a['path']}",
                 "og_type": "article",
@@ -664,13 +611,9 @@ def write_last_run(cfg: dict, payload: dict[str, Any]) -> None:
     write_json(LAST_RUN_PATH, out)
 
 
-# -----------------------------
-# Main
-# -----------------------------
 def main() -> None:
     cfg = load_config()
 
-    # Hard fail if base_url missing (clear error for beginners)
     base_url = (cfg.get("site", {}).get("base_url") or "").strip()
     if not base_url:
         raise RuntimeError("config.site.base_url is missing (example: https://YOURNAME.github.io/YOURREPO)")
@@ -683,17 +626,12 @@ def main() -> None:
     cand = pick_candidate(cfg, processed, articles)
     if not cand:
         build_site(cfg, site_dir, articles)
-        write_last_run(
-            cfg,
-            {"created": False, "article_url": "", "article_title": "", "source_url": "", "note": "No new candidate found. Site rebuilt."},
-        )
+        write_last_run(cfg, {"created": False, "article_url": "", "article_title": "", "source_url": "", "note": "No new candidate found. Site rebuilt."})
         return
 
     llm_title, body_html = deepseek_article(cfg, cand)
     body_html = strip_leading_duplicate_title(body_html, llm_title or cand.get("title", ""))
 
-    # Optional affiliate block
-    ads_catalog = {}
     affiliate_html = ""
     chosen_ad_id = None
     if cfg.get("ads", {}).get("enabled_affiliate_block", False):
@@ -735,10 +673,7 @@ def main() -> None:
 
     build_site(cfg, site_dir, articles)
 
-    write_last_run(
-        cfg,
-        {"created": True, "article_url": article_url, "article_path": path, "article_title": cand.get("title", ""), "source_url": cand.get("link", "")},
-    )
+    write_last_run(cfg, {"created": True, "article_url": article_url, "article_path": path, "article_title": cand.get("title", ""), "source_url": cand.get("link", "")})
 
 
 if __name__ == "__main__":
