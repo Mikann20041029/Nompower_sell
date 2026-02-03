@@ -1,0 +1,19 @@
+{
+  "site": {
+    "base_url": "https://YOURNAME.github.io/YOURREPO",
+    "title": "Nompower",
+    "description": "Daily digest",
+    "contact_email": "you@example.com",
+    "site_dir": "docs",
+    "go_base_url": "",
+    "user_agent": "Mozilla/5.0 (compatible; NompowerBot/1.0)"
+  },
+  "ads": {
+    "enabled": false,
+    "enabled_affiliate_block": false,
+    "enable_ad_context_in_prompt": true
+  },
+  "og": {
+    "cache_images": true
+  }
+}
